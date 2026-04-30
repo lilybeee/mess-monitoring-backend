@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 import models, database
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import datetime
 import asyncio
 import json
@@ -33,6 +33,18 @@ active_state = {
 
 
 # ─────────────────────────────────────────────
+# MEAL TIME WINDOWS
+# ─────────────────────────────────────────────
+
+MEAL_TIME_WINDOWS = {
+    "breakfast": (datetime.time(7, 30), datetime.time(10, 0)),
+    "lunch":     (datetime.time(12, 0), datetime.time(14, 30)),
+    "snacks":    (datetime.time(16, 30), datetime.time(18, 0)),
+    "dinner":    (datetime.time(19, 0), datetime.time(21, 0)),
+}
+
+
+# ─────────────────────────────────────────────
 # PYDANTIC SCHEMAS
 # ─────────────────────────────────────────────
 
@@ -43,6 +55,11 @@ class UpdateStatusRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+class UpdateMenuIdRequest(BaseModel):
+    meal_type: str          # "breakfast" | "lunch" | "snacks" | "dinner"
+    date: str               # "YYYY-MM-DD"
+    menu_id: int = Field(..., ge=1, le=56)
 
 
 # ─────────────────────────────────────────────
@@ -265,6 +282,67 @@ def update_status(req: UpdateStatusRequest, db: Session = Depends(get_db)):
             db.commit()
 
     return {"status": "success", "message": "State updated"}
+
+
+# ─────────────────────────────────────────────
+# ADMIN — UPDATE MENU ID FOR A DATE + MEAL WINDOW
+# Updates all people_count rows that fall within the
+# given meal's time window on the specified date.
+# ─────────────────────────────────────────────
+
+@app.patch("/api/admin/update_menu_id")
+def update_menu_id(req: UpdateMenuIdRequest, db: Session = Depends(get_db)):
+    meal_key = req.meal_type.lower()
+    if meal_key not in MEAL_TIME_WINDOWS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid meal_type '{req.meal_type}'. Must be one of: {list(MEAL_TIME_WINDOWS.keys())}"
+        )
+
+    try:
+        target_date = datetime.date.fromisoformat(req.date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    start_time, end_time = MEAL_TIME_WINDOWS[meal_key]
+    window_start = datetime.datetime.combine(target_date, start_time)
+    window_end   = datetime.datetime.combine(target_date, end_time)
+
+    # Verify menu_id exists in the menu table
+    menu_exists = db.query(models.Menu).filter(models.Menu.menu_id == req.menu_id).first()
+    if not menu_exists:
+        raise HTTPException(status_code=404, detail=f"menu_id {req.menu_id} does not exist in the menu table.")
+
+    rows = (
+        db.query(models.PeopleCount)
+        .filter(
+            models.PeopleCount.timing >= window_start,
+            models.PeopleCount.timing <= window_end,
+        )
+        .all()
+    )
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No records found for {req.meal_type} on {req.date} ({window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')})."
+        )
+
+    updated_count = 0
+    for row in rows:
+        row.menu_id = req.menu_id
+        updated_count += 1
+
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Updated {updated_count} record(s) for {req.meal_type} on {req.date} to menu_id {req.menu_id}.",
+        "updated_rows": updated_count,
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+    }
+
 
 import os
 import uvicorn
