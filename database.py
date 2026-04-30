@@ -8,9 +8,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_yFW41YZV
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Note: Some sqlalchemy engines might have issues with channel_binding parameter, 
-# if so it can be omitted, but sslmode=require is kept.
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"sslmode": "require"},
+    pool_pre_ping=True,      # tests connection before using it
+    pool_recycle=300,        # recycles connections every 5 mins (important for Neon)
+)
 
-engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
