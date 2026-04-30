@@ -265,3 +265,11 @@ def update_status(req: UpdateStatusRequest, db: Session = Depends(get_db)):
             db.commit()
 
     return {"status": "success", "message": "State updated"}
+
+import os
+import uvicorn
+
+port = int(os.environ.get("PORT", 8000))
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
