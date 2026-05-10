@@ -8,6 +8,12 @@ import datetime
 import asyncio
 import json
 
+# ── ML imports ──────────────────────────────
+import joblib
+import numpy as np
+import pytz
+from pathlib import Path
+
 app = FastAPI()
 
 app.add_middleware(
@@ -33,6 +39,29 @@ active_state = {
 
 
 # ─────────────────────────────────────────────
+# ML MODEL — load once at startup
+# ─────────────────────────────────────────────
+
+IST = pytz.timezone('Asia/Kolkata')
+
+_model   = None
+_scaler  = None
+_columns = None
+
+def load_ml_model():
+    global _model, _scaler, _columns
+    if Path("model.pkl").exists() and Path("scaler.pkl").exists() and Path("feature_columns.pkl").exists():
+        _model   = joblib.load("model.pkl")
+        _scaler  = joblib.load("scaler.pkl")
+        _columns = joblib.load("feature_columns.pkl")
+        print("ML model loaded successfully")
+    else:
+        print("ML model files not found — /predict endpoint will be unavailable")
+
+load_ml_model()
+
+
+# ─────────────────────────────────────────────
 # MEAL TIME WINDOWS
 # ─────────────────────────────────────────────
 
@@ -42,6 +71,15 @@ MEAL_TIME_WINDOWS = {
     "snacks":    (datetime.time(16, 30), datetime.time(18, 0)),
     "dinner":    (datetime.time(19, 0), datetime.time(21, 0)),
 }
+
+# Slot boundaries as decimal hours (must match preprocessing.py)
+def _assign_slot(hour: int, minute: int):
+    t = hour + minute / 60
+    if   7.50 <= t < 10.00: return "Breakfast"
+    elif 12.00 <= t < 14.50: return "Lunch"
+    elif 16.50 <= t < 18.00: return "Snacks"
+    elif 19.00 <= t < 21.00: return "Dinner"
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -242,6 +280,71 @@ def get_traffic(db: Session = Depends(get_db)):
 
 
 # ─────────────────────────────────────────────
+# PREDICT — people count for current time + 5 min
+# GET /api/predict
+# Returns: { predicted_people, for_time, meal_slot }
+# Returns 400 if called outside a meal slot window
+# ─────────────────────────────────────────────
+
+@app.get("/api/predict")
+def predict_people(db: Session = Depends(get_db)):
+    if _model is None:
+        raise HTTPException(status_code=503, detail="ML model not loaded. Ensure model.pkl, scaler.pkl, feature_columns.pkl are present.")
+
+    # Current IST time + 5 minutes
+    now_ist   = datetime.datetime.now(IST) + datetime.timedelta(minutes=5)
+    hour      = now_ist.hour
+    minute    = now_ist.minute
+    dow       = now_ist.weekday()        # 0=Mon, 6=Sun
+    is_weekend = int(dow in [5, 6])
+
+    # Get day_type_id from the latest DB record (keeps it consistent with ingest)
+    day_type_id = 0
+    latest_pc = db.query(models.PeopleCount).order_by(
+        models.PeopleCount.timing.desc()
+    ).first()
+    if latest_pc:
+        # Map DB day_type_id → model encoding (1→0, 4→1, matches preprocessing.py)
+        day_type_id = 0 if latest_pc.day_type_id == 1 else 1
+
+    slot = _assign_slot(hour, minute)
+    if slot is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No active meal slot at {now_ist.strftime('%H:%M')} IST."
+        )
+
+    features = {
+        'day_type_id':          day_type_id,
+        'hour':                 hour,
+        'minute':               minute,
+        'is_weekend':           is_weekend,
+        'meal_slot_Breakfast':  int(slot == 'Breakfast'),
+        'meal_slot_Dinner':     int(slot == 'Dinner'),
+        'meal_slot_Lunch':      int(slot == 'Lunch'),
+        'meal_slot_Snacks':     int(slot == 'Snacks'),
+        'day_of_week_0':        int(dow == 0),
+        'day_of_week_1':        int(dow == 1),
+        'day_of_week_2':        int(dow == 2),
+        'day_of_week_3':        int(dow == 3),
+        'day_of_week_4':        int(dow == 4),
+        'day_of_week_5':        int(dow == 5),
+        'day_of_week_6':        int(dow == 6),
+    }
+
+    # Build feature vector in exact same column order as training
+    X = np.array([features[col] for col in _columns]).reshape(1, -1)
+    X_scaled = _scaler.transform(X)
+    prediction = _model.predict(X_scaled)[0]
+
+    return {
+        "predicted_people": max(0, round(float(prediction))),
+        "for_time":         now_ist.strftime("%H:%M"),
+        "meal_slot":        slot,
+    }
+
+
+# ─────────────────────────────────────────────
 # ADMIN ENDPOINTS
 # ─────────────────────────────────────────────
 
@@ -313,7 +416,6 @@ def update_menu_id(req: UpdateMenuIdRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"menu_id {req.menu_id} does not exist in the menu table.")
 
     # FIX: use bulk UPDATE instead of fetch-and-mutate loop
-    # This bypasses the autoflush=False session setting and writes directly to the DB
     updated_count = (
         db.query(models.PeopleCount)
         .filter(
