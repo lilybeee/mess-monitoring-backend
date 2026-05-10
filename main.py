@@ -274,12 +274,11 @@ def update_status(req: UpdateStatusRequest, db: Session = Depends(get_db)):
 
     live_entry = db.query(models.LiveCount).first()
     if live_entry and live_entry.menu_id:
-        menu = db.query(models.Menu).filter(
+        # FIX: use bulk update to guarantee the write hits the DB
+        db.query(models.Menu).filter(
             models.Menu.menu_id == live_entry.menu_id
-        ).first()
-        if menu:
-            menu.description = req.menu
-            db.commit()
+        ).update({"description": req.menu}, synchronize_session=False)
+        db.commit()
 
     return {"status": "success", "message": "State updated"}
 
@@ -313,25 +312,22 @@ def update_menu_id(req: UpdateMenuIdRequest, db: Session = Depends(get_db)):
     if not menu_exists:
         raise HTTPException(status_code=404, detail=f"menu_id {req.menu_id} does not exist in the menu table.")
 
-    rows = (
+    # FIX: use bulk UPDATE instead of fetch-and-mutate loop
+    # This bypasses the autoflush=False session setting and writes directly to the DB
+    updated_count = (
         db.query(models.PeopleCount)
         .filter(
             models.PeopleCount.timing >= window_start,
             models.PeopleCount.timing <= window_end,
         )
-        .all()
+        .update({"menu_id": req.menu_id}, synchronize_session=False)
     )
 
-    if not rows:
+    if updated_count == 0:
         raise HTTPException(
             status_code=404,
             detail=f"No records found for {req.meal_type} on {req.date} ({window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')})."
         )
-
-    updated_count = 0
-    for row in rows:
-        row.menu_id = req.menu_id
-        updated_count += 1
 
     db.commit()
 
