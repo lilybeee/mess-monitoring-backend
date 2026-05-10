@@ -4,7 +4,7 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 anyio
-scikit-learn
+scikit-learn==1.6.1
 xgboost
 joblib
 numpy
