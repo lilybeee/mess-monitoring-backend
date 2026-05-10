@@ -4,3 +4,8 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 anyio
+scikit-learn
+xgboost
+joblib
+numpy
+pytz
